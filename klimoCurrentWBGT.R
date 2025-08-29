@@ -297,11 +297,8 @@ dir.create(save_dir, recursive = TRUE, showWarnings = FALSE)
 full_ds     <- try(open_dataset(save_file,
                                 thrift_string_size_limit    = 1e9,
                                 thrift_container_size_limit = 1e8))
-
-
-
 # names(full_ds)[order(names(full_ds))]
-
+# 
 
 
 if (inherits(full_ds, "try-error")){
