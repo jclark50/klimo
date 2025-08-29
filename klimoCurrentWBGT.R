@@ -425,45 +425,12 @@ row_latest$td = calcDewpoint(row_latest$ta, row_latest$relh, 'degC', 'degC')
 # Added 20250821
 
 
-############################################################--------------------------------
-############################################################--------------------------------
 
 ############################################################--------------------------------
 ############################################################--------------------------------
-# fetch_latest_biases <- function(conn, site_ids = NULL, table = "bias_latest_json") {
-#   where <- if (length(site_ids)) {
-#     sprintf("WHERE siteRecID IN (%s)", paste(sprintf("'%s'", site_ids), collapse = ","))
-#   } else ""
-#   dt <- data.table(DBI::dbGetQuery(conn, sprintf("SELECT * FROM %s %s", table, where)))
-#   if (!nrow(dt)) return(dt)
-# 
-#   # expand JSON to columns
-#   bj <- lapply(dt$biases_json, function(x) {
-#     y <- tryCatch(jsonlite::fromJSON(x), error = function(e) list())
-#     as.data.table(as.list(y))
-#   })
-#   biases <- data.table::rbindlist(bj, fill = TRUE)
-#   dt[, biases_json := NULL]
-#   cbind(dt, biases)
-# }
-# source("/opt/klimo/code/biasCorrectionFunctions.R")
-# conn <- dbConnect(RMySQL::MySQL(),
-#                   user = "jordan", password = "wxther50!!@@",
-#                   dbname = 'klimoWBGT', host = Sys.getenv("SQL_SERVER_IP"),
-#                   port = 3306, local_infile = TRUE)
-# bias_latest <- fetch_latest_biases(conn)
-# dbDisconnect(conn)
-# row_latest_corrected  <- try(apply_biases(row_latest, bias_latest))
-# if (inherits(row_latest_corrected, "try-error")){
-#   row_latest_corrected = row_latest
-# }
-# 
-# 
-##############################################################
-##############################################################
-##############################################################
-##############################################################
-##############################################################
+############################################################--------------------------------
+############################################################--------------------------------
+
 # unloadNamespace('RMySQL')
 # library(DBI)
 
@@ -663,46 +630,6 @@ apply_biases2 = function(therowlatest){
     print(row_latest_bc[siteRecID=="Sycaten", .(validTime, ta_bc, td_bc, relh_bc, wind10m_bc, solar_bc, tcdc_bc)][1])
   }
   
-  
-  
-  
-  # models_to_apply <- c("hrrr","hrrr_subh")
-  # 
-  # cols_additive <- c("ta","td","relh","tcdc","lcdc","mcdc","hcdc")
-  # cols_ratio    <- c("wind10m","wind2m","wind2m_shade","wind2m_sun",
-  #                    "solar","solar_shade","solar_sun")
-  # 
-  # # (Optional, recommended) recompute dewpoint from corrected Ta/RH for physical consistency
-  # # recompute_td_from_ta_rh <- TRUE
-  # 
-  # # Replace base columns with *_bc when available and finite
-  # overwrite_from_bc <- function(dt, cols, models = models_to_apply) {
-  #   for (c in cols) {
-  #     bc <- paste0(c, "_bc")
-  #     if (bc %in% names(dt)) {
-  #       dt[model %in% models & is.finite(get(bc)), (c) := get(bc)]
-  #     }
-  #   }
-  #   invisible(dt)
-  # }
-  # 
-  # # Apply
-  # overwrite_from_bc(row_latest_bc, c(cols_additive, cols_ratio))
-  # 
-  # # # Consistent Td: prefer recompute from ta/relh after overwriting, else fall back to td_bc if present
-  # # if (recompute_td_from_ta_rh && all(c("ta","relh") %in% names(row_latest_bc))) {
-  # #   row_latest_bc[model %in% models_to_apply,
-  # #                 td := calcDewpoint(ta, relh, 'degC','degC')]
-  # # } else if ("td_bc" %in% names(row_latest_bc)) {
-  # #   row_latest_bc[model %in% models_to_apply & is.finite(td_bc), td := td_bc]
-  # # }
-  # # 
-  # # # (Optional) drop the *_bc columns if you don’t want to carry them
-  # # keep <- setdiff(names(row_latest_bc), grep("_bc$", names(row_latest_bc), value=TRUE))
-  # # row_latest_bc <- row_latest_bc[, ..keep]
-  # # 
-  # # 
-  
   # --- after you have row_latest_bc with *_bc columns ---
   
   # Which models to overwrite in-place:
@@ -797,6 +724,7 @@ if (inherits(row_latest_corrected, "try-error")){
 
 ############################################################--------------------------------
 ############################################################--------------------------------
+
 
 ############################################################--------------------------------
 ############################################################--------------------------------
