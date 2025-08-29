@@ -320,7 +320,7 @@ needed_cols <- c("lat","lon","index", "ta","relh","wind2m",'wind10m','WDIR',
                  'CRAIN',"model",'uvi','uvi_est','uvi_clear'
                  # "wbgt", "wbgt_shade", "wbgt_sun"
 )
-
+# 
 
 needed_cols_available = names(full_ds)[names(full_ds) %in% needed_cols]
 
