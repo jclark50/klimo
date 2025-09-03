@@ -14,12 +14,15 @@ suppressPackageStartupMessages({
   library(DBI)
   
 })
-# 
-# 
+
+
 source("/opt/klimo/code/sentry_utils.R")
 
 timed('start')
 
+Sys.setenv(AWS_SECRET_ACCESS_KEY = "REMOVED")
+Sys.setenv(AWS_DEFAULT_REGION = "us-east-1")  # Correct region without the 'b'
+Sys.setenv(AWS_ACCESS_KEY_ID = "REMOVED")
 
 
 list_all_s3_objects <- function(bucket,
@@ -34,15 +37,15 @@ list_all_s3_objects <- function(bucket,
   if (!requireNamespace("data.table", quietly = TRUE)) {
     stop("Please install the 'data.table' package to use list_all_s3_objects().")
   }
-
+  
   # Ensure prefix ends with “/” if not NULL
   if (!is.null(prefix) && !grepl("/$", prefix)) {
     prefix <- paste0(prefix, "/")
   }
-
+  
   all_pages <- list()   # we will append each page’s DT here
   marker    <- NULL     # for the first page, marker=NULL
-
+  
   repeat {
     # Build the argument list for get_bucket()
     args <- list(
@@ -53,7 +56,7 @@ list_all_s3_objects <- function(bucket,
     if (!is.null(marker)) {
       args$marker <- marker
     }
-
+    
     # Fetch one “page” of up to max_keys objects
     this_batch <- try(do.call(aws.s3::get_bucket, args), silent = TRUE)
     if (inherits(this_batch, "try-error")) {
@@ -64,7 +67,7 @@ list_all_s3_objects <- function(bucket,
       # No more objects under that prefix
       break
     }
-
+    
     # Parse each object’s metadata into a list of lists
     page_list <- lapply(this_batch, function(obj) {
       list(
@@ -76,29 +79,29 @@ list_all_s3_objects <- function(bucket,
         StorageClass = obj$StorageClass
       )
     })
-
+    
     # rbind into a data.table
     page_dt <- data.table::rbindlist(page_list, fill = TRUE)
     all_pages[[length(all_pages) + 1]] <- page_dt
-
+    
     # If fewer than max_keys returned, we’re done
     if (length(this_batch) < max_keys) {
       break
     }
-
+    
     # Otherwise set marker = last key from this batch, to fetch the next batch
     marker <- tail(this_batch, n = 1)[[1]]$Key
   }
-
+  
   # If nothing was fetched, return NULL
   if (length(all_pages) == 0) {
     message(sprintf("No objects found in s3://%s/%s", bucket, prefix))
     return(NULL)
   }
-
+  
   # Combine all pages into one data.table
   all_dt <- data.table::rbindlist(all_pages, use.names = TRUE, fill = TRUE)
-
+  
   # Convert LastModified → POSIXct (UTC) if it's still character
   if (is.character(all_dt$LastModified)) {
     all_dt[, LastModified := as.POSIXct(
@@ -107,25 +110,25 @@ list_all_s3_objects <- function(bucket,
       tz     = "UTC"
     )]
   }
-
+  
   # Optionally filter by file extension/pattern
   if (!is.null(fileext)) {
     all_dt <- all_dt[grepl(fileext, Key, ignore.case = TRUE), ]
   }
-
+  
   # Sort ascending by LastModified
   data.table::setorder(all_dt, LastModified)
-
+  
   # Optionally return only the newest rows
   if (returnTail) {
     return(tail(all_dt, n = max_keys))
   }
-
+  
   # Drop any “folder” placeholder rows equal to exactly the prefix (if they exist)
   if (!is.null(prefix)) {
     all_dt <- all_dt[Key != prefix]
   }
-
+  
   return(all_dt)
 }
 
@@ -147,6 +150,100 @@ on.exit(try(DBI::dbDisconnect(conn), silent = TRUE), add = TRUE)
 
 info_dt = as.data.table(dbGetQuery(conn, "SELECT * FROM klimoWBGT.info"))
 
+# 
+# 
+# sqlquer = 
+#   "
+#   WITH base AS (
+#   SELECT
+#     i.siteRecID AS id,
+#     i.tz,
+#     CASE
+#       WHEN CONVERT_TZ('2000-01-01 00:00:00','UTC', i.tz) IS NULL
+#         THEN UTC_TIMESTAMP()
+#       ELSE CONVERT_TZ(UTC_TIMESTAMP(),'UTC', i.tz)
+#     END AS local_now
+#   FROM klimoWBGT.info i
+# ),
+# bounds AS (
+#   SELECT
+#     id, tz,
+#     DATE(local_now) AS local_date,
+#     /* start/end of local day, converted back to UTC; if tz unusable, they’re already UTC */
+#     CASE
+#       WHEN CONVERT_TZ('2000-01-01 00:00:00','UTC', tz) IS NULL
+#         THEN DATE(local_now)
+#       ELSE CONVERT_TZ(DATE(local_now), tz, 'UTC')
+#     END AS start_utc,
+#     CASE
+#       WHEN CONVERT_TZ('2000-01-01 00:00:00','UTC', tz) IS NULL
+#         THEN DATE(local_now) + INTERVAL 1 DAY
+#       ELSE CONVERT_TZ(DATE(local_now) + INTERVAL 1 DAY, tz, 'UTC')
+#     END AS end_utc
+#   FROM base
+# )
+# SELECT
+#   b.id,
+#   b.tz,
+#   b.local_date,
+#   COALESCE(SUM(COALESCE(w.ms_qpe_01h_p2_mm, w.qpe01h_mm)), 0) AS precip_mm_today,
+#   COUNT(COALESCE(w.ms_qpe_01h_p2_mm, w.qpe01h_mm))            AS hours_counted
+# FROM bounds b
+# LEFT JOIN klimoWBGT.mrms_point_extracts_wide w
+#   ON w.id = b.id
+#  AND w.ts_utc >= b.start_utc
+#  AND w.ts_utc <  b.end_utc
+# GROUP BY b.id, b.tz, b.local_date
+# ORDER BY b.id;
+# 
+# "
+# fdfd = as.data.table(dbGetQuery(conn, sqlquer))
+# 
+# fdfd[id == '1423c879-d15b-4083-9b73-3a4940fea1ee']
+# 
+# 
+# fdfd$precip_in = round(fdfd$precip_mm_today / 25.4, 2)
+# 
+# fdfd[precip_in  > 0]
+# 
+# 
+# # 
+# # fdfd = as.data.table(dbGetQuery(conn, 'select * from mrms_point_extracts_wide'))
+# # fdfd$ms_qpe_24h_p1_in = round(fdfd$ms_qpe_24h_p1_mm / 25.4, 2)
+# # fdfd$ms_qpe_24h_p2_in = round(fdfd$ms_qpe_24h_p2_mm / 25.4, 2)
+# # 
+# # # # max(fdfd$ms_qpe_24h_p1_in, na.rm=TRUE)
+# # # max(fdfd$ms_qpe_24h_p2_in, na.rm=TRUE)
+# # fdfd$rain_24h = fdfd$ms_qpe_24h_p2_in
+# # fdfd = fdfd[,c("id","rain_24h")]
+# # fdfd[is.na(rain_24h), rain_24h := 0]
+# # # 
+# # # 
+# # # 
+# # # max(fdfd$qpe01h_mm, na.rm=TRUE)
+# # # 
+# # # fdfd[qpe01h_mm == max(fdfd$qpe01h_mm, na.rm=TRUE)]
+# # # 
+# # # 
+# fdfd = as.data.table(dbGetQuery(conn, 'select * from mrms_site_latest'))
+# fdfd$ms_qpe_24h_p1_in = round(fdfd$ms_qpe_24h_p1_mm / 25.4, 2)
+# fdfd$ms_qpe_24h_p2_in = round(fdfd$ms_qpe_24h_p2_mm / 25.4, 2)
+# 
+# # # max(fdfd$ms_qpe_24h_p1_in, na.rm=TRUE)
+# # max(fdfd$ms_qpe_24h_p2_in, na.rm=TRUE)
+# fdfd$rain_24h = fdfd$ms_qpe_24h_p2_in
+# fdfd = fdfd[,c("id","rain_24h")]
+# fdfd[is.na(rain_24h), rain_24h := 0]
+# 
+# 
+# fdfd[order(rain_24h)]
+
+
+
+
+
+
+
 ################################################################################
 ################################################################################
 
@@ -157,7 +254,7 @@ requireRAM <- function(threshold = 4000,
                        unit = "MB",
                        wait_time = 10,
                        max_attempts = 10) {
-
+  
   #' Check Available System RAM
   check_ram <- function(threshold,
                         unit = "MB",
@@ -171,7 +268,7 @@ requireRAM <- function(threshold = 4000,
                          "GB" = 1024^3,
                          stop("Invalid unit. Use B, KB, MB, or GB."))
     threshold_bytes <- threshold * multiplier
-
+    
     # Internal helper to get free RAM in bytes
     get_available_ram <- function() {
       if (.Platform$OS.type == "windows") {
@@ -189,11 +286,11 @@ requireRAM <- function(threshold = 4000,
         as.numeric(parts[7])
       }
     }
-
+    
     for (attempt in seq_len(max_attempts)) {
       available_bytes <- get_available_ram()
       available <- available_bytes / multiplier
-
+      
       if (available_bytes >= threshold_bytes) {
         cat(sprintf("Attempt %d: Available RAM = %s %s >= threshold %s %s\n",
                     attempt,
@@ -203,7 +300,7 @@ requireRAM <- function(threshold = 4000,
                     unit))
         return(TRUE)
       }
-
+      
       cat(sprintf("Attempt %d: Available RAM = %s %s < threshold %s %s; \
         waiting %s seconds...\n",
                   attempt,
@@ -214,14 +311,14 @@ requireRAM <- function(threshold = 4000,
                   wait_time))
       Sys.sleep(wait_time)
     }
-
+    
     cat(sprintf("RAM availability remained below %s %s after %d attempts. Exiting.\n",
                 threshold, unit, max_attempts))
     quit(save = "no", status = 1)
   }
-
-
-
+  
+  
+  
   attempts <- 0
   while (!check_ram(threshold,
                     unit = unit,
@@ -251,35 +348,35 @@ requireRAM(3000, wait_time = 4, max_attempts = 20)   # blocks until you have ≥
 get_xano_table <- function(table   = 'sites',
                            query     = list(),
                            auth_tok  = NULL) {
-
+  
   if (table == 'sites'){
     get_url = 'https://xd8o-zhxg-pkco.n7e.xano.io/api:TkOVqxmz/jordan/wbgt_sites'
   } else if (table == 'alerts') {
     get_url = 'https://xd8o-zhxg-pkco.n7e.xano.io/api:TkOVqxmz/wbgt_alerts_nws'
   }
-
+  
   headers <- c(`Content-Type` = "application/json")
   if (!is.null(auth_tok)) {
     headers["Authorization"] <- paste("Bearer", auth_tok)
   }
-
+  
   resp <- httr::GET(
     url    = get_url,
     query  = query,
     httr::add_headers(.headers = headers)
   )
-
+  
   httr::stop_for_status(resp)
   outdt = as.data.table(httr::content(resp, "parsed", simplifyVector = TRUE))
-
+  
   if (table == 'sites'){
-
+    
     rename.cols(outdt, "id", "siteRecID")
-
+    
   }
-
+  
   return(outdt)
-
+  
 }
 
 xanoSites = get_xano_table('sites')
@@ -297,8 +394,11 @@ dir.create(save_dir, recursive = TRUE, showWarnings = FALSE)
 full_ds     <- try(open_dataset(save_file,
                                 thrift_string_size_limit    = 1e9,
                                 thrift_container_size_limit = 1e8))
+
+
+
 # names(full_ds)[order(names(full_ds))]
-# 
+
 
 
 if (inherits(full_ds, "try-error")){
@@ -311,16 +411,21 @@ if (inherits(full_ds, "try-error")){
   )
   message("Downloaded to ", save_file)
   full_ds     <- try(open_dataset(save_file))
-
+  
 }
+
+
 
 needed_cols <- c("lat","lon","index", "ta","relh","wind2m",'wind10m','WDIR',
                  "hi","refTime","validTime",'wind2m_shade', 'wind2m_sun',
                  "tcdc",'lcdc','mcdc','hcdc', "solar", 'solar_shade', 'solar_sun',
+                 "REFC",
                  'CRAIN',"model",'uvi','uvi_est','uvi_clear'
                  # "wbgt", "wbgt_shade", "wbgt_sun"
 )
-# 
+
+names(full_ds)[order(names(full_ds))]
+
 
 needed_cols_available = names(full_ds)[names(full_ds) %in% needed_cols]
 
@@ -339,17 +444,17 @@ results_by_model <- vector("list", length(models))
 names(results_by_model) <- models
 
 
-mdl = 'rtma_rapid'
+# mdl = 'hrrr'
 
 for (mdl in models) {
   dt_mod <- dt_indexed[model == mdl]
-
+  
   # 2b) Build a small "grid lookup" table of unique (lat, lon, index) for this model
   grid_dt     <- unique(dt_mod[, .(lat, lon, index)])
   grid_lon    <- grid_dt$lon
   grid_lat    <- grid_dt$lat
   grid_idx    <- grid_dt$index
-
+  
   # 2c) For each site in info_dt, find its nearest 'index' for this model
   #      We create a new column on info_dt called nearest_index_<mdl>
   nn_colname <- paste0("nearest_index_", mdl)
@@ -362,7 +467,7 @@ for (mdl in models) {
     # which.min(d2) gives the row in grid_dt with smallest distance
     grid_idx[which.min(d2)]
   }, by = seq_len(nrow(info_dt))]
-
+  
   # 2d) Now merge every siteRecID → dt_mod row via that nearest‐index
   #     We only keep sites that actually found a matching index (most should)
   cand <- merge(
@@ -375,12 +480,12 @@ for (mdl in models) {
   dt_mod = ''; gc()
   # cand now has columns: nearest_index, siteRecID, lat, lon, index, model, wbgt, ta, …, validTime, etc.
   # (Note: index and nearest_index are identical, so you can drop one if you like.)
-
+  
   # 2e) For each siteRecID, keep only the row with the **latest** validTime
   #     (That is, order by siteRecID and descending validTime, then take first per group.)
   setorder(cand, siteRecID, -validTime)
   row_latest_mdl <- cand # [, .SD[1], by = siteRecID]
-
+  
   # 2f) Attach any additional site metadata you want (e.g. state, organization, etc.)
   #     Just merge by siteRecID back from info_dt
   row_latest_mdl <- merge(
@@ -389,18 +494,18 @@ for (mdl in models) {
     by    = "siteRecID",
     all.x = TRUE
   )
-
+  
   # 2g) Tag this block with the model name so we can stack later
   row_latest_mdl[, model := mdl]
-
+  
   # 2h) Store in our results list
   results_by_model[[mdl]] <- row_latest_mdl
-
+  
   grid_dt = ''
   rm(grid_dt)
   gc()
-
-
+  
+  
 }
 
 # ──────────
@@ -409,6 +514,9 @@ row_latest = rbindlist(results_by_model)
 row_latest = row_latest[!is.na(ta)]
 
 row_latest$td = calcDewpoint(row_latest$ta, row_latest$relh, 'degC', 'degC')
+
+
+# row_latest[siteRecID == 'Sycaten']
 
 
 
@@ -425,12 +533,45 @@ row_latest$td = calcDewpoint(row_latest$ta, row_latest$relh, 'degC', 'degC')
 # Added 20250821
 
 
-
-############################################################--------------------------------
-############################################################--------------------------------
 ############################################################--------------------------------
 ############################################################--------------------------------
 
+############################################################--------------------------------
+############################################################--------------------------------
+# fetch_latest_biases <- function(conn, site_ids = NULL, table = "bias_latest_json") {
+#   where <- if (length(site_ids)) {
+#     sprintf("WHERE siteRecID IN (%s)", paste(sprintf("'%s'", site_ids), collapse = ","))
+#   } else ""
+#   dt <- data.table(DBI::dbGetQuery(conn, sprintf("SELECT * FROM %s %s", table, where)))
+#   if (!nrow(dt)) return(dt)
+# 
+#   # expand JSON to columns
+#   bj <- lapply(dt$biases_json, function(x) {
+#     y <- tryCatch(jsonlite::fromJSON(x), error = function(e) list())
+#     as.data.table(as.list(y))
+#   })
+#   biases <- data.table::rbindlist(bj, fill = TRUE)
+#   dt[, biases_json := NULL]
+#   cbind(dt, biases)
+# }
+# source("/opt/klimo/code/biasCorrectionFunctions.R")
+# conn <- dbConnect(RMySQL::MySQL(),
+#                   user = "jordan", password = "wxther50!!@@",
+#                   dbname = 'klimoWBGT', host = Sys.getenv("SQL_SERVER_IP"),
+#                   port = 3306, local_infile = TRUE)
+# bias_latest <- fetch_latest_biases(conn)
+# dbDisconnect(conn)
+# row_latest_corrected  <- try(apply_biases(row_latest, bias_latest))
+# if (inherits(row_latest_corrected, "try-error")){
+#   row_latest_corrected = row_latest
+# }
+# 
+# 
+##############################################################
+##############################################################
+##############################################################
+##############################################################
+##############################################################
 # unloadNamespace('RMySQL')
 # library(DBI)
 
@@ -630,6 +771,46 @@ apply_biases2 = function(therowlatest){
     print(row_latest_bc[siteRecID=="Sycaten", .(validTime, ta_bc, td_bc, relh_bc, wind10m_bc, solar_bc, tcdc_bc)][1])
   }
   
+  
+  
+  
+  # models_to_apply <- c("hrrr","hrrr_subh")
+  # 
+  # cols_additive <- c("ta","td","relh","tcdc","lcdc","mcdc","hcdc")
+  # cols_ratio    <- c("wind10m","wind2m","wind2m_shade","wind2m_sun",
+  #                    "solar","solar_shade","solar_sun")
+  # 
+  # # (Optional, recommended) recompute dewpoint from corrected Ta/RH for physical consistency
+  # # recompute_td_from_ta_rh <- TRUE
+  # 
+  # # Replace base columns with *_bc when available and finite
+  # overwrite_from_bc <- function(dt, cols, models = models_to_apply) {
+  #   for (c in cols) {
+  #     bc <- paste0(c, "_bc")
+  #     if (bc %in% names(dt)) {
+  #       dt[model %in% models & is.finite(get(bc)), (c) := get(bc)]
+  #     }
+  #   }
+  #   invisible(dt)
+  # }
+  # 
+  # # Apply
+  # overwrite_from_bc(row_latest_bc, c(cols_additive, cols_ratio))
+  # 
+  # # # Consistent Td: prefer recompute from ta/relh after overwriting, else fall back to td_bc if present
+  # # if (recompute_td_from_ta_rh && all(c("ta","relh") %in% names(row_latest_bc))) {
+  # #   row_latest_bc[model %in% models_to_apply,
+  # #                 td := calcDewpoint(ta, relh, 'degC','degC')]
+  # # } else if ("td_bc" %in% names(row_latest_bc)) {
+  # #   row_latest_bc[model %in% models_to_apply & is.finite(td_bc), td := td_bc]
+  # # }
+  # # 
+  # # # (Optional) drop the *_bc columns if you don’t want to carry them
+  # # keep <- setdiff(names(row_latest_bc), grep("_bc$", names(row_latest_bc), value=TRUE))
+  # # row_latest_bc <- row_latest_bc[, ..keep]
+  # # 
+  # # 
+  
   # --- after you have row_latest_bc with *_bc columns ---
   
   # Which models to overwrite in-place:
@@ -725,7 +906,6 @@ if (inherits(row_latest_corrected, "try-error")){
 ############################################################--------------------------------
 ############################################################--------------------------------
 
-
 ############################################################--------------------------------
 ############################################################--------------------------------
 
@@ -740,7 +920,7 @@ if (inherits(row_latest_corrected, "try-error")){
 # thelatestrow = row_latest_corrected
 
 getTheLatestWBGT = function(thelatestrow){
-
+  
   # unloadNamespace('RMySQL')
   # library(RMySQL)
   ############################################################
@@ -749,79 +929,60 @@ getTheLatestWBGT = function(thelatestrow){
   ############################################################
   ############################################################
   # UV INDEX FORECAST DATA
-
-
+  
+  
   all_uv_dat = unique(thelatestrow[,c("siteRecID","validTime","uvi","uvi_clear")])
-
+  
   all_uv_dat[, validTime := round_date(validTime, unit = "hour")]
-
-
+  
+  
   # thelatestrow[siteRecID == '94cb6ead-2cfc-40fb-94d0-db9f50075394']
-
+  
   row_latest_hrrsubh = thelatestrow[model == 'hrrr_subh'] # & is.na(uvi)].
   # row_latest_hrrsubh$uv_time
   row_latest_hrrsubh[, uv_time := round_date(validTime, unit = "hour")]
   row_latest_hrrsubh$uvi = NULL
   row_latest_hrrsubh$uvi_clear = NULL
-
+  
   # 2) ensure your UV index table is keyed by its validTime, lat_uv, lon_uv
   setkey(all_uv_dat, siteRecID, validTime)
-
-
-  # # row_latest_hrrsubh[,.N]
-  # row_latest_hrrsubh[,c("uv_time","siteRecID")]
-  # all_uv_dat[,c("validTime","siteRecID")]
-  #
-
-
+  
   # unique(row_latest_hrrsubh, by = c("siteRecID","validTime"))
-
+  
   row_latest_hrrsubh = merge(row_latest_hrrsubh, all_uv_dat, by.x = c('uv_time', "siteRecID"),
                              by.y = c("validTime","siteRecID"), all.x=TRUE, allow.cartesian=TRUE) # [,.N]
-
-
-
+  
+  
+  
   thelatestrow = rbindlist(list(row_latest_hrrsubh, thelatestrow[model != 'hrrr_subh']), fill=TRUE)
-
-
-  #
-  #
-  #
-  #
-  # thelatestrow$ta
-  # thelatestrow$wbgt
-  # thelatestrow$wind2m
-  #
-  #
-  #
-
+  
   ############################################################
   ############################################################
   ############################################################
-
+  
   # countna(thelatestrow)
-
-
+  
+  
   results_by_model = ''
   dt_mod = ''
   rm(results_by_model)
   rm(dt_mod)
   gc()
-
+  
   thelatestrow = thelatestrow[order(validTime)]
   # compute the time‐difference (in minutes) from now
   thelatestrow[, timediff := difftime(validTime, Sys.time(), units = "mins")]
-
+  
   thelatestrow[, pres := 1013.5]
   # thelatestrow[siteRecID == '3664b9bf-c3dd-4e13-835b-73e09d531274']
   ##_____________________________________________________________________
   ##_____________________________________________________________________
   ##_____________________________________________________________________
-
+  
   # QUERY Sql table where i regularly update the values (temp, humidity, and also WBGT estimates themnselves) for ASOS/AWOS across US.
   # not currently used in the code, but lays groundwork for incorporation.
-
-
+  
+  
   #
   #
   # apt = getSQL2(sqlquery = 'select * from station.AirportWBGT', databaseName = 'station',
@@ -870,33 +1031,33 @@ getTheLatestWBGT = function(thelatestrow){
   # ##_____________________________________________________________________
   ##_____________________________________________________________________
   ##_____________________________________________________________________
-
-
-
-
+  
+  
+  
+  
   rename.cols(thelatestrow, c("lcdc","mcdc","hcdc","tcdc"), c("lcdc1","mcdc1","hcdc1","tcdc1"))
-
-
+  
+  
   thelatestrow = thelatestrow[!is.na(lon) | !is.na(lat)]
-
+  
   if (is.null(thelatestrow$rh)){
     rename.cols(thelatestrow, "relh", "rh")
   }
   thelatestrow <- na.omit(thelatestrow, cols = c("ta"))
-
-
+  
+  
   ############################################
   ############################################
   #
   # threshold_mi = 10
   # time_cutoff_min = 20
   # buf_km = 20
-
+  
   matchGOES <- function(row_dt, threshold_mi = 10,  time_cutoff_min = 20, buf_km = 20) {
     buf_m <- buf_km * 1000  # convert to metres
-
+    
     # 1) Read the two Parquet tables
-
+    
     #── A) Read in your two Parquet ta
     # les ────────────────────────────────────
     #── A) Read & prepare the low‐res GOES table ────────────────────────────────
@@ -907,9 +1068,9 @@ getTheLatestWBGT = function(thelatestrow){
       hcdc        = rowMeans(.SD[, .(hcdc1, hcdc2)], na.rm=TRUE),
       goes_clouds = 1L
     ), .SDcols = c("lcdc1","lcdc2","hcdc1","hcdc2")]
-
+    
     # quantile(low$tcdc, na.rm=TRUE)
-
+    
     #── B) Read & prepare the high‐res GOES‐COD table ───────────────────────────
     high <- as.data.table( collect(open_dataset("/data/sat/goes2/goes-current-cod_cmi_v211.parquet")))
     # r <- rast(
@@ -919,25 +1080,25 @@ getTheLatestWBGT = function(thelatestrow){
     # )
     # plot(r)
     # countna(high)
-
-
-
+    
+    
+    
     # high[!is.na(COD)]
     # range(low$tcdc, na.rm=TRUE)
-
+    
     goesvalidTime = low$goesvalidTime[1]
-
+    
     # 2) Turn your sites into a SpatVector
     pts <- vect(row_dt[, .(lon, lat)], crs = "EPSG:4326")
-
+    
     # 3) Helper: for a given field name, build & extract
     # as.data.table(pts)
-
+    
     # # avail_low extract_field, dt = low, pts = pts, buf = buf_m)
     # fld = 'COD'
     # buf = 20 * 1000 # 20 km buffer in metres
     # dt = high
-
+    
     #── 3) A small helper: build a one‐band raster & extract center+buffer ────
     extract_field <- function(dt, fld, pts, buf) {
       # build the raster
@@ -951,7 +1112,7 @@ getTheLatestWBGT = function(thelatestrow){
       ex_c <- extract(r, pts, method = "near")
       # extract the buffer‐mean
       ex_b <- extract(r, pts, buffer = buf, fun = mean, na.rm = TRUE)
-
+      
       # return a two‐column data.table with safe names
       df <- data.table(match = ex_c$v, buf = ex_b$v)
       setnames(df,
@@ -959,23 +1120,23 @@ getTheLatestWBGT = function(thelatestrow){
                new = c(paste0(fld, "_match"), paste0(fld, "_buf")))
       df
     }
-
+    
     extract_field2 <- function(dt, fld, pts, buf) {
-
+      
       # if it’s a character column, we’ll rasterize the *mode* (most frequent) in the buffer
       if (is.character(dt[[fld]])) {
         # 1) turn to a factor so we can map back later
         fac   <- factor(dt[[fld]])
         levels <- levels(fac)
         codes  <- as.integer(fac)
-
+        
         # 2) build a temporary integer raster of factor codes
         r <- rast(
           x    = data.frame(x = dt$lon, y = dt$lat, v = codes),
           type = "xyz",
           crs  = "EPSG:4326"
         )
-
+        
         # helper to compute mode
         mode_fun <- function(x, ...) {
           x <- x[!is.na(x)]
@@ -983,19 +1144,19 @@ getTheLatestWBGT = function(thelatestrow){
           ux <- unique(x)
           ux[which.max(tabulate(match(x, ux)))]
         }
-
+        
         # 3) extract nearest‐pixel code
         ex_c <- extract(r, pts, method = "near")$v
-
+        
         # 4) extract buffer mode code
         ex_b <- extract(r, pts, buffer = buf, fun = mode_fun)$v
-
+        
         # 5) map back to the original character levels
         df <- data.table(
           match = levels[ex_c],
           buf   = levels[ex_b]
         )
-
+        
       } else {
         # numeric branch (unchanged from before)
         r <- rast(
@@ -1007,7 +1168,7 @@ getTheLatestWBGT = function(thelatestrow){
         ex_b <- extract(r, pts, buffer = buf, fun = mean, na.rm = TRUE)$v
         df <- data.table(match = ex_c, buf = ex_b)
       }
-
+      
       # 6) give safe column names and return
       setnames(
         df,
@@ -1016,7 +1177,7 @@ getTheLatestWBGT = function(thelatestrow){
       )
       return(df)
     }
-
+    
     #── 4) Low‐res fields (CCLC) ───────────────────────────────────────────────
     desired_low <- c("tcdc","lcdc","mcdc","hcdc") #,"cloud_thickness","cloud_type")
     avail_low   <- intersect(desired_low, names(low))
@@ -1027,7 +1188,7 @@ getTheLatestWBGT = function(thelatestrow){
     }
     low_list <- lapply(avail_low, extract_field, dt = low, pts = pts, buf = buf_m)
     low_out  <- if (length(low_list)) do.call(cbind, low_list) else NULL
-
+    
     #── 5) High‐res fields (COD, CMI13/14, cloudTopTemp) ──────────────────────
     desired_high <- c("COD","cmi13","cmi14","cloudTopTemp")# ,'cloud_type','cloud_thickness')
     avail_high   <- intersect(desired_high, names(high))
@@ -1038,14 +1199,14 @@ getTheLatestWBGT = function(thelatestrow){
     }
     high_list <- lapply(avail_high, extract_field, dt = high, pts = pts, buf = buf_m)
     high_out  <- if (length(high_list)) do.call(cbind, high_list) else NULL
-
+    
     #── 6) Bind back onto your original points ────────────────────────────────
-
+    
     row_dt$goesvalidTime <- goesvalidTime
     result <- cbind(row_dt, low_out, high_out)
     return(result)
   }
-
+  
   # 1) Attempt the call
   row_latest_goes <- try(matchGOES(
     row_dt = thelatestrow,
@@ -1053,7 +1214,7 @@ getTheLatestWBGT = function(thelatestrow){
     time_cutoff_min = 20,
     buf_km       = 20
   ))
-
+  
   # 2) If it errored, report and handle
   if (inherits(row_latest_goes, "try-error")) {
     percentagemissing = round((row_latest_goes[is.na(COD_match)][,.N] / row_latest_goes[,.N])*100)
@@ -1061,19 +1222,19 @@ getTheLatestWBGT = function(thelatestrow){
       message = "matchGOES failed",
       level   = "error",
       # tags    = list(fn = "matchGOES"),
-
+      
       tags = list(
         script    = "klimoCurrentWBGT",
         fn        = "matchGOES",
         percentmissing = percentagemissing,
         environment = "production"
       ),
-
+      
       verbose=FALSE
     )
   }
-
-
+  
+  
   ##########################################
   ##########################################
   # 2) Filter to daytime only
@@ -1085,42 +1246,42 @@ getTheLatestWBGT = function(thelatestrow){
                                            fifelse(COD_match <  5 & cloudTopTemp_match > 273.15, "Thin Water",
                                                    "Other")
   ) ]
-
+  
   row_latest_goes$goes_age = as.numeric(difftime(row_latest_goes$goesvalidTime[1],
                                                  row_latest_goes$validTime, units = 'mins'))
-
+  
   row_latest_goes[abs(goes_age) < 20 & !is.na(lcdc_match), lcdc := lcdc_match]
   row_latest_goes[abs(goes_age) < 20 & !is.na(mcdc_match), mcdc := mcdc_match]
   row_latest_goes[abs(goes_age) < 20 & !is.na(hcdc_match), hcdc := hcdc_match]
   row_latest_goes[abs(goes_age) < 20 & !is.na(tcdc_match), tcdc := tcdc_match]
-
-
+  
+  
   row_latest_goes[, zenith := jj::zenithinfo(jj::solarinfo(validTime), lon, lat)]
   row_latest_goes[zenith > 85, `:=`( tcdc = tcdc1, lcdc = lcdc1, mcdc = mcdc1, hcdc = hcdc1 )]
-
-
+  
+  
   cols2drop = names(row_latest_goes)[names(row_latest_goes) %likeany% c("buf","match")]
-
-
+  
+  
   row_latest_goes = row_latest_goes[, !cols2drop, with=FALSE]
   gc()
-
+  
   # row_latest_goes$
   #####################
   coeffs       <- list(low=0.30, mid=0.60, high=0.90)
-
+  
   row_latest_goes[tolower(cloud_thickness)  == 'thin', thick_mul := 0.5]
   row_latest_goes[tolower(cloud_thickness)  == 'moderate', thick_mul := 1.0]
   row_latest_goes[tolower(cloud_thickness)  == 'thick', thick_mul := 1.5]
   row_latest_goes[tolower(cloud_thickness) == 'dense', thick_mul := 2.0]
-
+  
   # 3) compute fractions & thickness factor
   row_latest_goes[, `:=`(
     frac_low   = lcdc/100,
     frac_mid   = mcdc/100,
     frac_high  = hcdc/100
   )]
-
+  
   # row_latest_goes$cloud_thickness
   # 2) compute raw remainders for *all* rows (vectors)
   row_latest_goes[, `:=`(
@@ -1128,63 +1289,99 @@ getTheLatestWBGT = function(thelatestrow){
     rem_mid_raw  = 1 - coeffs$mid  * frac_mid  * thick_mul,
     rem_high_raw = 1 - coeffs$high * frac_high * thick_mul
   )]
-
-
+  
+  
   # nm
   # 3) clip those to ≥0
   for (nm in c("rem_low_raw","rem_mid_raw","rem_high_raw")) {
     row_latest_goes[, (nm) := pmax(0, get(nm))]
   }
-
+  
   # 4) flag who has *any* layer information
   row_latest_goes[, has_layers := !is.na(lcdc) | !is.na(mcdc) | !is.na(hcdc)]
-
+  
   # row_latest_goes[is.na(rem_low_raw)]
   # 5) assign cloud_mod for layer‐cases
   row_latest_goes[has_layers == TRUE,
                   cloud_mod := rem_low_raw * rem_mid_raw * rem_high_raw
   ]
-
+  
   # 6) fallback for pure-tcdc cases (no layers but have tcdc)
   row_latest_goes[has_layers == FALSE & !is.na(tcdc),
                   cloud_mod := pmax(0, 1 - coeffs$mid * tcdc * thick_mul)
   ]
-
+  
   # 7) drop the helper columns if you like
   row_latest_goes[, c("rem_low_raw","rem_mid_raw","rem_high_raw","has_layers") := NULL]
-
+  
   # impose a minimum transmission of 5 %
   min_trans <- 0.3
   row_latest_goes[, cloud_mod := pmax(cloud_mod, min_trans)]
-
+  
   # 8) finally compute your UVI estimate
   row_latest_goes[, uvi_est := uvi_clear * cloud_mod]
-
-
+  
+  
   row_latest_goes[is.na(uvi_est), uvi_est := uvi]
-
-
-
-
-
-
-
-
-
-
+  
+  
+  
+  
+  ########################################################################
+  ########################################################################
+  
+  
+  ########################################################################
+  ########################################################################
+  
+  
+  ########################################################################
+  ########################################################################
+  
+  
+  site_mrms = as.data.table(dbGetQuery(conn, "SELECT * FROM klimoWBGT.mrms_site_latest"))
+  rename.cols(site_mrms, "id", 'siteRecID')
+  
+  
+  row_latest_goes <- merge(row_latest_goes, site_mrms[,!c("lat","lon"), with=FALSE], by = c("siteRecID"), all.x=TRUE)
+  
+  
+  row_latest_goes[preciprate_mm_per_hr > 1, CRAIN := 1]
+  row_latest_goes[preciprate_mm_per_hr > 1, REFC := refl_lowest_dbz]
+  
+  
+  
+  # row_latest_goes[preciprate_mm_per_hr > 1]$tcdc
+  # row_latest_goes[preciprate_mm_per_hr > 1]$lcdc
+  # row_latest_goes[preciprate_mm_per_hr > 1]$mcdc
+  # row_latest_goes[preciprate_mm_per_hr > 1]$hcdc
+  row_latest_goes[preciprate_mm_per_hr > 1, tcdc := 99]
+  
+  row_latest_goes[preciprate_mm_per_hr > 1, lcdc := 90]
+  row_latest_goes[preciprate_mm_per_hr > 1, mcdc := 85]
+  row_latest_goes[preciprate_mm_per_hr > 1, hcdc := 85]
+  
   #
   # row_latest_goes[siteRecID == 'Sycaten']$solar
   #
   #
   # row_latest_goes[siteRecID == 'Sycaten']$wind10m
   #
-
-
+  
   ########################################################################
   ########################################################################
+  
+  
+  ########################################################################
+  ########################################################################
+  
+  
+  ########################################################################
+  ########################################################################
+  
   # recalculate solar radiation based on latest GOES cloud data at multiple heights.
-
-
+  
+  
   # 1) direct‐sunlight estimate
   row_latest_goes[, solar := calcSolar(
     lat        = lat,
@@ -1206,7 +1403,7 @@ getTheLatestWBGT = function(thelatestrow){
   )]
   row_latest_goes[, solar := round(solar, 0)]
   # attr(row_latest_goes$solar, "method") <- "bras_atc_hcdc_mcdc_lcdc"
-
+  
   # 2) “cloudy‐sky” (fixed–high‐cloud) estimate
   row_latest_goes[, solar_shade := calcSolar(
     lat        = lat,
@@ -1226,7 +1423,7 @@ getTheLatestWBGT = function(thelatestrow){
     method     = "basic"
   )]
   # attr(row_latest_goes$solar_shade, "method") <- "bras_hcdc90_mcdc85_lcdc85"
-
+  
   # 3) “full‐sun” (zero‐cloud) estimate
   row_latest_goes[, solar_sun := calcSolar(
     lat        = lat,
@@ -1246,26 +1443,26 @@ getTheLatestWBGT = function(thelatestrow){
     method     = "basic"
   )]
   # attr(row_latest_goes$solar_sun, "method") <- "bras_hcdc0_mcdc0_lcdc0"
-
-
+  
+  
   ########################################################################
   ########################################################################
   # Get surface roughness info for downscaling wind speeds from 10m to 2m AGL.
   source("/opt/klimo/code/get_roughness_raster.R")
-
+  
   roughness_raster = try(get_roughness_raster(hrrr_source = 's3'))
-
+  
   if (!inherits(roughness_raster , "try-error")) {
     # 1) Prepare your roughness SpatRaster in a projected CRS (so distances are meters)
     # r0_ll  <- roughness_raster         # your existing lon/lat SpatRaster
     r0_proj <- project(roughness_raster, "EPSG:5070")  # USA Albers (units = m)
-
+    
     # 2) Define buffer radius in meters and build a circular & directional kernels
     radius_m <- 5e3  # e.g. 5 km
-
+    
     # build a full circular kernel first
     circ_kern <- focalMat(r0_proj, radius_m, type="circle")
-
+    
     # helper to zero out half of that kernel
     make_sector_kernel <- function(mat, quadrant = c("N","E","S","W")) {
       nr <- nrow(mat); nc <- ncol(mat)
@@ -1273,7 +1470,7 @@ getTheLatestWBGT = function(thelatestrow){
       coords  <- as.data.frame(which(mat>0, arr.ind=TRUE))
       dx <- coords$col - ctr_col
       dy <- coords$row - ctr_row
-
+      
       keep <- switch(
         quadrant,
         N = dy >  0,
@@ -1285,61 +1482,61 @@ getTheLatestWBGT = function(thelatestrow){
       m2[!keep] <- 0
       m2 / sum(m2)   # normalize so sum == 1
     }
-
+    
     dirs4   <- c("N","E","S","W")
     kernels <- setNames(lapply(dirs4, make_sector_kernel, mat=circ_kern), dirs4)
-
+    
     # 3) Convolve once per direction (this is the heavy bit, but only 4×)
     z_dirs <- lapply(kernels, function(k) {
       focal(r0_proj, w = k, fun = sum, na.rm = TRUE, filename="", overwrite=TRUE)
     })
     z_stack_proj <- rast(z_dirs)
     names(z_stack_proj) <- paste0("z0m_", dirs4)
-
+    
     # 4) Reproject back to lon/lat so you can extract by lon/lat points
     z_stack_ll <- project(z_stack_proj, crs(roughness_raster), method="bilinear")
-
+    
     z_stack_proj = ''
     roughness_raster = ''
-
+    
     # ############  ############
     # ############  ############
     dirs4   <- c("N","E","S","W")
     angles4 <- setNames(c(0,90,180,270), dirs4)
     half4   <- 45
     radius_km = 5
-
+    
     res  <- 0.4
     r_m       <- radius_km * 1000
     dirs  =    dirs4
     angles  =  angles4
     half_ang  <- 45
-
+    
     # ############  ############  # ############  ############  # ############  ############
     # ############  ############  # ############  ############  # ############  ############
     # ############  ############  # ############  ############  # ############  ############
-
+    
     grid_dt = row_latest_goes[,c("lat","lon")]
-
-
+    
+    
     # 1) Turn your grid_dt into a SpatVector of points
     grid_pts <- vect(grid_dt, geom = c("lon","lat"), crs = "EPSG:4326")
-
+    
     # 2) Extract all four layers at once
     #    This returns a data.frame with columns ID, z0m_N, z0m_E, z0m_S, z0m_W
     dir_vals <- terra::extract(z_stack_ll, grid_pts)
-
-
+    
+    
     z_stack_proj = ''
     gc()
-
-
+    
+    
     # 3) Bind them back onto grid_dt
     setDT(dir_vals)[, ID := NULL]      # drop the internal “ID” column
     grid_dt[, c("z0m_N","z0m_E","z0m_S","z0m_W") := dir_vals]
-
-
-
+    
+    
+    
     # 1) Update‐join grid_dt’s z0m_* columns onto alldat by (lat,lon)
     setkey(grid_dt, lat, lon)
     # This is much faster than merge(..., allow.cartesian=TRUE)
@@ -1353,7 +1550,7 @@ getTheLatestWBGT = function(thelatestrow){
       ),
       on = .(lat, lon)
     ]
-
+    
     # 2) In one pass, pick the right z0m_* based on WDIR using fcase()
     row_latest_goes[
       ,
@@ -1365,137 +1562,151 @@ getTheLatestWBGT = function(thelatestrow){
         default = NA_real_
       )
     ]
-
+    
     ##########
     # alldat = merge(alldat, hrrr_sfcr[,c("siteRecID","sfcr")], by = 'siteRecID', all.x = TRUE)
     row_latest_goes = row_latest_goes[!is.na(wind10m)]
-
+    
     ########
-
+    
     row_latest_goes$wind2m_sfcr = logwind(solar=row_latest_goes$solar, wind=row_latest_goes$wind10m,
                                           sfcr = TRUE, z0m = row_latest_goes$sfcr, height1low =2, height2high =10, urbanORrural = 'urban')
     row_latest_goes[sfcr == 0, wind2m_sfcr := NA]
-
-
-
+    
+    
+    
   } else {
     row_latest_goes$wind2m_sfcr = NA
   }
-
-
-
-
-
-
+  
+  
+  
+  
+  
+  
   row_latest_goes[is.na(wind2m_sfcr), wind2m_sfcr := logwind(solar=solar, wind=wind10m, urbanORrural="urban",
                                                              vert_temp_gradient=-0.1,  height1low =2, height2high =10)]
-
-
+  
+  
   row_latest_goes$wind2m = NULL
   rename.cols(row_latest_goes, "wind2m_sfcr", "wind2m")
-
+  
   row_latest_goes$wind2m = logwind(solar=row_latest_goes$solar, wind=row_latest_goes$wind10m,
                                    urbanORrural="urban",
                                    vert_temp_gradient=-0.1,  height1low =2, height2high =10)
   row_latest_goes$wind2m_shade = logwind(solar=row_latest_goes$solar_shade, wind=row_latest_goes$wind10m,
                                          urbanORrural="urban",
                                          vert_temp_gradient=-0.1,  height1low =2, height2high =10)
-
+  
   row_latest_goes$wind2m_sun = logwind(solar=row_latest_goes$solar_sun, wind=row_latest_goes$wind10m,
                                        urbanORrural="urban",
                                        vert_temp_gradient=-0.1,  height1low =2, height2high =10)
-
-
-
-
+  
+  
+  
+  
   # windSpeedThreshold = 0.75
   # windSpeedThreshold = 1.25 # temporary setting this to 1.25 20250710 133400
   windSpeedThreshold = 0.8 # temporary setting this to 0.8 20250726141600
-
+  
   ###########################
   # added this extra correction at 20240820175000
   windspeedextracorrection = 0.7
   row_latest_goes[wind2m > 3, wind2m := wind2m * windspeedextracorrection] # was >4 until
   row_latest_goes[wind2m > 3, wind2m_shade := wind2m_shade * windspeedextracorrection]
   row_latest_goes[wind2m > 3, wind2m_sun := wind2m_sun * windspeedextracorrection]
-
+  
   ###########################
   windspeedextracorrection_allspeeds = 0.75 # 20250726 141900
-
+  
   row_latest_goes[wind2m > 1.25, wind2m := wind2m * windspeedextracorrection_allspeeds]
   row_latest_goes[wind2m > 1.25, wind2m_shade := wind2m_shade * windspeedextracorrection_allspeeds]
   row_latest_goes[wind2m > 1.25, wind2m_sun := wind2m_sun * windspeedextracorrection_allspeeds]
-
-
+  
+  
   ###########################
   # row_latest_goes[wind2m_sfcr < windSpeedThreshold, wind2m_sfcr := windSpeedThreshold]
   row_latest_goes[wind2m < windSpeedThreshold, wind2m := windSpeedThreshold]
   row_latest_goes[wind2m_shade < windSpeedThreshold, wind2m_shade := windSpeedThreshold]
   row_latest_goes[wind2m_sun < windSpeedThreshold, wind2m_sun := windSpeedThreshold]
-
+  
   #########################################
   #########################################
-
+  
   # Calculate WBGT. Liljegren et al 2008 method.
-
+  
   row_latest_goes$rh = row_latest_goes$relh
-
-
+  
+  
   row_latest_goes[, wbgt := calcWBGT(validTime, lat, lon, solar, pres, as.numeric(ta), rh, wind2m,
                                      zspeed = rep(2, .N), dT = rep(1, .N), urban = rep(1, .N), calcTpsy = FALSE,
                                      convergencethreshold = 0.02,
                                      inputUnits = list(ta = "degC", rh = "%", pres = "hPa", wind = "m/s", solar = "W/m^2"),
                                      outputUnits = "degC", surface_type = NULL,
                                      surface_properties = NULL, numOfThreads = 3)$wbgt]
-
+  
   row_latest_goes[, wbgt_shade := calcWBGT(validTime, lat, lon, solar_shade, pres, as.numeric(ta), rh, wind2m_shade,
                                            zspeed = rep(2, .N), dT = rep(1, .N), urban = rep(1, .N), calcTpsy = FALSE,
                                            convergencethreshold = 0.02,
                                            inputUnits = list(ta = "degC", rh = "%", pres = "hPa", wind = "m/s", solar = "W/m^2"),
                                            outputUnits = "degC", surface_type = NULL,
                                            surface_properties = NULL, numOfThreads = 3)$wbgt]
-
-
+  
+  
   row_latest_goes[, wbgt_sun := calcWBGT(validTime, lat, lon, solar_sun, pres, as.numeric(ta), rh, wind2m_sun,
                                          zspeed = rep(2, .N), dT = rep(1, .N), urban = rep(1, .N), calcTpsy = FALSE,
                                          convergencethreshold = 0.02,
                                          inputUnits = list(ta = "degC", rh = "%", pres = "hPa", wind = "m/s", solar = "W/m^2"),
                                          outputUnits = "degC", surface_type = NULL,
                                          surface_properties = NULL, numOfThreads = 3)$wbgt]
-
-
+  
+  
   unit(row_latest_goes$wbgt) <- 'degF'
   unit(row_latest_goes$wbgt_shade) <- 'degF'
   unit(row_latest_goes$wbgt_sun) <- 'degF'
   unit(row_latest_goes$ta) <- 'degF'
-
+  
   unit(row_latest_goes$wind2m) <- 'mph'
   unit(row_latest_goes$wind10m) <- 'mph'
-
-
+  
+  
   row_latest_goes = row_latest_goes[!is.na(ta)]
-
+  
+  # 
+  # 
+  # row_latest_goes[preciprate_mm_per_hr > 1]$wbgt
+  # row_latest_goes[preciprate_mm_per_hr > 1]$solar
+  # 
+  # 
+  # # 
+  # # >   row_latest_goes[preciprate_mm_per_hr > 1]$wbgt
+  # # [1] 66.95039 62.89650 65.54816
+  # attr(,"unit")
+  # [1] "degF"
+  # >   row_latest_goes[preciprate_mm_per_hr > 1]$solar
+  # [1] 116  83 119
+  # > 
   # #########################################
   # # #########################################
   # # # Process WBGT and other temperature columns
   wbgt_cols <- c("wbgt", "wbgt_shade", "wbgt_sun",'ta')
-
+  
   row_latest_goes[, (wbgt_cols) := lapply(.SD, round, digits = 1), .SDcols = wbgt_cols]
-
-
-
+  
+  
+  
   # # #########################################
   # # #########################################
   row_latest_goes$hi = round(calcHI(airTemp  = row_latest_goes$ta, relativeHumidity  = row_latest_goes$rh,
                                     inputunits = "degF", outputunits = "degF"), 1)
-
+  
   row_latest_goes = row_latest_goes[order(validTime)]
   row_latest_goes$date = j.date(row_latest_goes$validTime)
-
+  
   return(row_latest_goes)
-
-
-
+  
+  
+  
 }
 
 row_latest$rh = row_latest$relh
@@ -1506,6 +1717,7 @@ row_latest_corrected = try(getTheLatestWBGT(row_latest_corrected))
 if (inherits(row_latest_corrected, "try-error")){
   row_latest_corrected = row_latest_uncorrected
 }
+
 # 
 # #
 # #
@@ -1526,7 +1738,8 @@ vars_wanted <- c(
   "wind10m","wind2m","wind2m_shade","wind2m_sun",
   "solar","solar_shade","solar_sun",
   "tcdc","lcdc","mcdc","hcdc",
-  "uvi","uvi_est"
+  "uvi","uvi_est",
+  'CRAIN','REFC'
 )
 vars_keep <- intersect(vars_wanted, intersect(names(row_latest_uncorrected), names(row_latest_corrected)))
 merged_uc <- merge(
@@ -1694,24 +1907,24 @@ flag_wbgt_changes <- function(previousWBGT, row_latest_goes, threshold = 10) {
   # ensure data.table
   previousWBGT    <- as.data.table(previousWBGT)
   row_latest_goes <- as.data.table(row_latest_goes)
-
+  
   # keep one row per site in each table (latest by validTime)
   prev <- previousWBGT[order(siteRecID, -validTime),
                        .SD[1], by = siteRecID][,
                                                .(siteRecID, prev_wbgt = wbgt, prev_validTime = validTime)]
-
+  
   curr <- row_latest_goes[order(siteRecID, -validTime),
                           .SD[1], by = siteRecID][,
                                                   .(siteRecID, latest_wbgt = wbgt, latest_validTime = validTime)]
-
+  
   # inner join on siteRecID (only sites present in both)
   out <- merge(prev, curr, by = "siteRecID", all = FALSE)
-
+  
   # compute differences and flag
   out[, diff        := latest_wbgt - prev_wbgt]
   out[, diff_abs    := abs(diff)]
   out[, flag_change := !is.na(diff_abs) & diff_abs > threshold]
-
+  
   # optional: return flagged first
   setorder(out, -flag_change, siteRecID)
   return(out[])
@@ -1721,6 +1934,44 @@ flag_wbgt_changes <- function(previousWBGT, row_latest_goes, threshold = 10) {
 wbgt_flagged <- flag_wbgt_changes(previousWBGT[, .(siteRecID, wbgt, validTime)],
                                   row_latest_goes[, .(siteRecID, wbgt, validTime)],
                                   threshold = 10)
+
+# wbgt_flagged[1:20]
+# > wbgt_flagged[1:20]
+# siteRecID prev_wbgt
+# <char>     <num>
+#   1:        2e82c1c8-361e-41d6-9dbb-ffe91f7c93de        54
+# 2:        42b53b88-685d-4164-986c-3a6ffdee33f2        63
+# 3:        44e2c02c-b07b-4ad8-b783-356c0c9a803f        53
+# 4:        876c34aa-665d-4dec-ab30-92d32902da73        74
+# 5:        a7036856-8651-41d4-b673-9a8cd2c9f7a3        64
+# 6:        abb2b48a-9d48-43bf-a8e2-39b5e51f73b2        53
+# 7:        ec0c6f94-b50b-4c17-b951-454721b94c0c        53
+# 8:        fe173db6-e990-4fec-ac13-9b24c2c7c3a9        54
+# 9:    xxe6578361-b0ba-4258-a38a-b07d11c7b9f92e        53
+# 10: xxe657836sss1-b0ba-4258-a38a-b07d11c7b9f92e        51
+# 11:        0089eee8-cb7c-44a7-b023-c4e375f8ce0e        74
+# 12:        04759905-2b58-48e5-9781-1830a318b01d        68
+# 13:        04af01a9-ded3-42fc-af08-2a31bfb82f51        67
+# 14:        05b46f8b-564b-4e46-bc51-fee930708d12        69
+# 15:        065deeb6-0ca4-4791-8084-b385d062a5cb        69
+# 16:        096bac54-4676-4866-9434-09d7aa7c62a8        69
+# 17:        09aec707-6273-43f4-9917-99638904237a        69
+# 18:        0a06c770-a4d9-414d-8f17-f058acfb3bc6        68
+# 19:        0b1d6aa3-1f8b-4dd8-9e53-fc3f5028aca6        71
+# 20:        0ca22fd1-ef26-41c9-9c01-a2b4c49f2770        69
+# siteRecID prev_wbgt
+# prev_validTime latest_wbgt    latest_validTime  diff diff_abs
+# <POSc>       <num>              <POSc> <num>    <num>
+#   1: 2025-09-01 14:23:55        66.1 2025-09-01 16:08:55  12.1     12.1
+# 2: 2025-09-01 14:23:55        75.3 2025-09-01 16:08:55  12.3     12.3
+# 3: 2025-09-01 14:23:55        67.0 2025-09-01 16:08:55  14.0     14.0
+# 4: 2025-09-01 14:23:55        84.8 2025-09-01 16:08:55  10.8     10.8
+# 5: 2025-09-01 14:23:55        74.7 2025-09-01 16:08:55  10.7     10.7
+# 6: 2025-09-01 14:23:55        67.0 2025-09-01 16:08:55  14.0     14.0
+# 7: 2025-09-01 14:23:55        67.0 2025-09-01 16:08:55  14.0     14.0
+# 8: 2025-09-01 14:23:55        66.1 2025-09-01 16:08:55  12.1     12.1
+# 9: 2025-09-01 14:23:55        67.0 2025-09-01 16:08:55  14.0     14.0
+# 10: 2025-09-01 14:23:55        62.9 2025-09-01 16:08:55  11.9     11.9
 
 if (any(wbgt_flagged$flag_change == TRUE)){
   slack_message = sprintf("ALERT: RAPID WBGT CHANGE at %s sites, avg change of %s°F",
@@ -1777,7 +2028,7 @@ arrow::write_parquet(merged_uc, parquetfilename_with_biascorrection_and_original
 ########################################################################################################################
 
 row_latest_goes = merge(row_latest_goes, info_dt[,c("siteRecID","name")], by = 'siteRecID')
-
+# row_latest_goes$CRAIN
 
 ########################################################################################################################
 ########################################################################################################################
@@ -1838,10 +2089,10 @@ row_latest_goes <- row_latest_goes[, .SD[which.min(abs(timediff))], by = siteRec
 get_weather_info <- function(tcdc, wind2m, CRAIN, daytime) {
   # Convert daytime to logical
   daytime <- as.logical(daytime)
-
+  
   # Handle cases where tcdc is NA
   tcdc <- ifelse(is.na(tcdc), 0, tcdc)
-
+  
   # Vectorized determination of weather description
   desc <- ifelse(CRAIN == 1 & tcdc > 90, "Rain",
                  ifelse(CRAIN == 1 & tcdc > 60, "Scattered Showers",
@@ -1851,7 +2102,7 @@ get_weather_info <- function(tcdc, wind2m, CRAIN, daytime) {
                                              ifelse(tcdc > 60, "Mostly Cloudy",
                                                     ifelse(tcdc > 30, "Partly Cloudy",
                                                            ifelse(daytime, "Sunny", "Clear"))))))))
-
+  
   # Vectorized determination of icons based on description and daytime
   icon <- #ifelse(CRAIN == 1 & tcdc > 90, ifelse(daytime, "adobe-heavy-rain", "adobe-heavy-rain"),
     ifelse(CRAIN == 1 & tcdc > 90, ifelse(daytime, "adobe-day-rain", "adobe-night-rain"),
@@ -1862,10 +2113,10 @@ get_weather_info <- function(tcdc, wind2m, CRAIN, daytime) {
                                        ifelse(tcdc > 60, ifelse(daytime, "adobe-day-mostly-cloudy", "adobe-night-mostly-cloudy"),
                                               ifelse(tcdc > 30, ifelse(daytime, "adobe-day-partly-cloudy", "adobe-night-partly-cloudy"),
                                                      ifelse(daytime, "adobe-sun", "adobe-moon"))))))))
-
+  
   # Add wind description if applicable
   # desc <- ifelse(wind2m >= 25, paste(desc, "and Windy"), desc)
-
+  
   return(list(desc = desc, icon = icon))
 }
 
@@ -1876,10 +2127,10 @@ row_latest_goes[, c("weatherDesc", "icon_name") := get_weather_info(tcdc, wind2m
 # row_latest_goes
 
 row_latest_goes[, windDesc := fifelse(as.numeric(wind2m) < 2, "Calm",
-                                       fifelse(as.numeric(wind2m) < 4, "Light Wind",
-                                               fifelse(as.numeric(wind2m) < 6.5, "Moderate Wind",
-                                                       fifelse(as.numeric(wind2m) >= 6.5 & as.numeric(wind2m) < 13, "Breezy", "Windy")
-                                               )))]
+                                      fifelse(as.numeric(wind2m) < 4, "Light Wind",
+                                              fifelse(as.numeric(wind2m) < 6.5, "Moderate Wind",
+                                                      fifelse(as.numeric(wind2m) >= 6.5 & as.numeric(wind2m) < 13, "Breezy", "Windy")
+                                              )))]
 
 
 
@@ -1917,6 +2168,7 @@ row_latest_goes[, icon_name := get_actual_icon(icon_name)]
   "Partly Cloudy"  = "🌤️",
   "Mostly Cloudy"  = "⛅️",
   "Cloudy"         = "☁️",
+  "Scattered Showers" = "🌧️",
   "Rain"           = "🌧️"
 )
 #
@@ -1934,7 +2186,14 @@ row_latest_goes[, weatherIcon := get_weather_icon(weatherDesc)]
 row_latest_goes[, icon_name := get_weather_icon(weatherDesc)]
 row_latest_goes[, conditionsIcon := get_weather_icon(weatherDesc)]
 
-
+# row_latest_goes[,.N,by=weatherDesc]
+# 
+# row_latest_goes[CRAIN == 1]
+# 
+# row_latest_goes[conditionsIcon == '']
+# row_latest_goes[,.N,by=conditionsIcon]
+# 
+# 
 
 ############################################################
 ############################################################
@@ -1953,7 +2212,7 @@ missing_tcdc <- row_latest_goes[is.na(tcdc)]
 if (nrow(missing_tcdc) > 0) {
   for (i in seq_len(nrow(missing_tcdc))) {
     this_row <- missing_tcdc[i]
-
+    
     sentry_error(
       message = "Missing Cloudcover for Current WBGT",
       tags = list(
@@ -2022,12 +2281,12 @@ load_policies <- function() {
   pol[, wbgtmax := as.numeric(wbgtmax)]
   pol[is.na(wbgtmin), wbgtmin := 0]
   pol[is.na(wbgtmax), wbgtmax := 110]
-
+  
   # Make bins half-open: [wbgtmin, wbgtmax)
   # (subtract a tiny epsilon from the upper edge to avoid boundary double-matches)
   eps <- 1e-8
   pol[, wbgtmax_open := wbgtmax - eps]
-
+  
   # Keep only what we need
   pol <- unique(pol[, .(policyGroupID, policyRecID, policyName, policyDetails,
                         policyColor, policyPriority, wbgtmin, wbgtmax_open)])
@@ -2046,42 +2305,42 @@ assign_policies_dt <- function(rows_dt,
   if (!all(c(wbgt_col, group_col) %in% names(rows_dt))) {
     stop(sprintf("Need columns '%s' and '%s' in rows_dt.", wbgt_col, group_col))
   }
-
+  
   # Ensure inputs
   rows <- copy(rows_dt)
   rows[, (wbgt_col) := as.numeric(get(wbgt_col))]
   rows[is.na(get(group_col)) | get(group_col) == "", (group_col) := default_group]
-
+  
   # Represent each point as a degenerate interval [wbgt, wbgt]
   rows[, wbgt_lo := get(wbgt_col)]
   rows[, wbgt_hi := get(wbgt_col)]
-
+  
   # Keys for overlap join by group + interval
   setkeyv(rows, c(group_col, "wbgt_lo", "wbgt_hi"))
   # policies_dt must be keyed on (policyGroupID, wbgtmin, wbgtmax_open)
   stopifnot(identical(key(policies_dt), c("policyGroupID","wbgtmin","wbgtmax_open")))
-
+  
   joined <- foverlaps(
     rows, policies_dt,
     by.x = c(group_col, "wbgt_lo", "wbgt_hi"),
     by.y = c("policyGroupID","wbgtmin","wbgtmax_open"),
     nomatch = NA_integer_
   )
-
+  
   # If a row matched multiple policies (overlapping bins), pick:
   # 1) highest policyPriority, 2) if tie, largest wbgtmin (tightest/highest bin)
   setorder(joined, siteRecID, validTime, -policyPriority, -wbgtmin)
   chosen <- joined[, .SD[1], by = .(siteRecID, validTime)]
-
+  
   # Post-process: normalize color for Clear Flag
   chosen[policyName == "Clear Flag", policyColor := "#F8F8F8"]
-
+  
   # Select tidy payload to merge back
   chosen_out <- chosen[, .(siteRecID, validTime,
                            policyGroupID,
                            policyName, policyRecID,
                            policyDetails, policyColor, policyPriority)]
-
+  
   chosen_out[]
 }
 
@@ -2164,8 +2423,8 @@ row_latest_goes = row_latest_goes[, !cols2drop, with  = FALSE]
 
 
 row_latest_goes$updated_at = jj::now(tz='UTC')
-  
-  
+
+
 
 #####################################
 #####################################
@@ -2225,15 +2484,15 @@ row_latest_goes$updated_at = jj::now(tz='UTC')
 
 prepare_current_payload <- function(row_latest_goes) {
   dt <- as.data.table(row_latest_goes)
-
+  
   # round/derive only if columns exist
   cols_round <- c("wbgt","wbgt_sun","wbgt_shade","hi","ta","wind2m","solar")
   for (cc in intersect(cols_round, names(dt))) dt[, (cc) := round(get(cc))]
-
+  
   if ("tcdc" %in% names(dt)) {
     dt[, cloudcover := round(as.numeric(tcdc))]
   }
-
+  
   # ---- policy mapping in bulk: compute once per unique (wbgt, policyGroupID)
   # if (!all(c("wbgt","policyGroupID") %in% names(dt))) {
   #   stop("row_latest_goes must have wbgt and policyGroupID to assign policy.")
@@ -2271,7 +2530,7 @@ prepare_current_payload <- function(row_latest_goes) {
   # setkeyv(dt, c("wbgt","policyGroupID"))
   # setkeyv(keys, c("wbgt","policyGroupID"))
   # dt <- keys[dt]
-
+  
   # return the payload ready to write; keep only columns that exist in DB table
   dt[]
 }
@@ -2280,9 +2539,9 @@ prepare_current_payload <- function(row_latest_goes) {
 
 bulk_upsert_current <- function(payload, con, target_table = "klimoWBGT.current",
                                 staging_table = "klimoWBGT__stg_current", key_cols = c("siteRecID")) {
-
+  
   stopifnot(nrow(payload) > 0L)
-
+  
   # Get target schema to align columns/order
   tgt_cols <- dbGetQuery(con, paste0("SHOW COLUMNS FROM ", target_table))$Field
   missing_in_payload <- setdiff(tgt_cols, names(payload))
@@ -2292,26 +2551,26 @@ bulk_upsert_current <- function(payload, con, target_table = "klimoWBGT.current"
   }
   # order columns exactly as target table
   payload <- payload[, ..tgt_cols]
-
+  
   # Use a transaction for speed/atomicity
   dbBegin(con)
   on.exit(try(dbRollback(con), silent = TRUE), add = TRUE)
-
+  
   # Drop/create staging (temporary or regular)
   if (dbExistsTable(con, staging_table)) dbRemoveTable(con, staging_table)
   # Create staging with same structure as target
   dbExecute(con, sprintf("CREATE TABLE %s LIKE %s", staging_table, target_table))
-
+  
   # Bulk write payload into staging
   dbWriteTable(con, staging_table, payload, append = TRUE, row.names = FALSE)
-
+  
   # Build ON DUPLICATE KEY UPDATE clause (don’t overwrite primary/unique key columns)
   updatable_cols <- setdiff(tgt_cols, key_cols)
   set_clause <- paste0(
     sprintf("%s = VALUES(%s)", updatable_cols, updatable_cols),
     collapse = ", "
   )
-
+  
   # Insert-select upsert
   sql <- sprintf(
     "INSERT INTO %1$s (%2$s)
@@ -2323,10 +2582,10 @@ bulk_upsert_current <- function(payload, con, target_table = "klimoWBGT.current"
     set_clause
   )
   dbExecute(con, sql)
-
+  
   # Clean up staging
   dbRemoveTable(con, staging_table)
-
+  
   dbCommit(con)
   invisible(TRUE)
 }
