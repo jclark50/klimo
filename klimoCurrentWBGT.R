@@ -2780,10 +2780,8 @@ timed('end')
 #
 #
 #
-#
-#
-# tmp_table <- "current_stage"
-#
+
+
 # # 1. Create stage table with identical structure
 # dbExecute(con, sprintf("CREATE TEMPORARY TABLE %s LIKE klimoWBGT.current;", tmp_table))
 #
