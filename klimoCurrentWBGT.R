@@ -297,7 +297,7 @@ requireRAM <- function(threshold = 4000,
                     unit))
         return(TRUE)
       }
-      
+      # 
       cat(sprintf("Attempt %d: Available RAM = %s %s < threshold %s %s; \
         waiting %s seconds...\n",
                   attempt,
