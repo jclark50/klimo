@@ -20,9 +20,6 @@ source("/opt/klimo/code/sentry_utils.R")
 
 timed('start')
 
-Sys.setenv(AWS_SECRET_ACCESS_KEY = "REMOVED")
-Sys.setenv(AWS_DEFAULT_REGION = "us-east-1")  # Correct region without the 'b'
-Sys.setenv(AWS_ACCESS_KEY_ID = "REMOVED")
 
 
 list_all_s3_objects <- function(bucket,
