@@ -283,7 +283,7 @@ requireRAM <- function(threshold = 4000,
         as.numeric(parts[7])
       }
     }
-    
+    # 
     for (attempt in seq_len(max_attempts)) {
       available_bytes <- get_available_ram()
       available <- available_bytes / multiplier
